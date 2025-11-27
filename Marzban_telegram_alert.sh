@@ -43,7 +43,7 @@ pip install pyTelegramBotAPI requests
 echo "📝 لطفاً مشخصات مورد نیاز را وارد کنید:"
 
 read -p "توکن ربات تلگرام: " BOT_TOKEN
-read -p "آدرس پایه Marzban API (مثلاً https://all.tbznet.top:4178): " MARZBAN_BASE_URL
+read -p "آدرس پایه Marzban API (مثلاً https://sub.DOMAIN.com:8000): " MARZBAN_BASE_URL
 read -p "نام کاربری ادمین Marzban: " ADMIN_USERNAME
 read -p "پسورد ادمین Marzban: " ADMIN_PASSWORD
 read -p "حجم هشدار (به بایت) [1073741824 = 1GB]: " LOW_VOLUME_BYTES
