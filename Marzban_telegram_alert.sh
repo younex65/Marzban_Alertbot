@@ -5,7 +5,7 @@ set -e
 echo "🚀 شروع نصب Marzban Telegram Alert Bot..."
 
 # ------------------------------
-# مرحله 1: آپدیت سیستم
+# مرحله 1: آپدیت و آپگرید سیستم
 # ------------------------------
 echo "🔄 آپدیت و آپگرید سیستم..."
 apt update -y && apt upgrade -y
@@ -43,11 +43,12 @@ pip install pyTelegramBotAPI requests
 echo "📝 لطفاً مشخصات مورد نیاز را وارد کنید:"
 
 read -p "توکن ربات تلگرام: " BOT_TOKEN
-read -p "آدرس پایه Marzban API (مثلاً https://sub.domain.com:8000): " MARZBAN_BASE_URL
+read -p "آدرس پایه Marzban API (مثلاً https://all.tbznet.top:4178): " MARZBAN_BASE_URL
 read -p "نام کاربری ادمین Marzban: " ADMIN_USERNAME
 read -p "پسورد ادمین Marzban: " ADMIN_PASSWORD
 read -p "حجم هشدار (به بایت) [1073741824 = 1GB]: " LOW_VOLUME_BYTES
 read -p "تعداد روز باقی مانده برای هشدار اعتبار [1]: " LOW_DAYS_REMAINING
+read -p "چند ثانیه یک‌بار کاربران چک شوند؟ (مثلاً 3600): " CHECK_INTERVAL
 
 # ------------------------------
 # مرحله 6: ایجاد config.json
@@ -60,6 +61,7 @@ cat > "$CONFIG_FILE" <<EOL
   "marzban_base_url": "$MARZBAN_BASE_URL",
   "marzban_admin_username": "$ADMIN_USERNAME",
   "marzban_admin_password": "$ADMIN_PASSWORD",
+  "check_interval": $CHECK_INTERVAL,
   "thresholds": {
     "low_volume_bytes": $LOW_VOLUME_BYTES,
     "low_days_remaining": $LOW_DAYS_REMAINING
@@ -74,7 +76,7 @@ cat > "$CONFIG_FILE" <<EOL
 EOL
 
 # ------------------------------
-# مرحله 7: دانلود یا ایجاد اسکریپت پایتون
+# مرحله 7: ایجاد اسکریپت پایتون — فقط اضافه شدن CHECK_INTERVAL
 # ------------------------------
 SCRIPT_FILE="$ALERT_DIR/marzban_telegram_alert.py"
 echo "📄 ساخت اسکریپت پایتون..."
@@ -99,6 +101,7 @@ BOT_TOKEN = config["telegram_bot_token"]
 MARZBAN_BASE_URL = config["marzban_base_url"].rstrip("/")
 ADMIN_USERNAME = config["marzban_admin_username"]
 ADMIN_PASSWORD = config["marzban_admin_password"]
+CHECK_INTERVAL = config.get("check_interval", 3600)   # ← اضافه شد
 THRESHOLDS = config["thresholds"]
 MESSAGES = config["messages"]
 
@@ -232,7 +235,7 @@ def check_users():
 def run_loop():
     while True:
         check_users()
-        time.sleep(600)  # هر ۱ ساعت
+        time.sleep(CHECK_INTERVAL)  # ← اینجا زمان از config.json خوانده می‌شود
 
 threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
 
