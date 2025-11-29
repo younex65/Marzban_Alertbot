@@ -23,7 +23,7 @@ cd "$PROJECT_DIR" || exit
 read -p "Telegram Bot Token: " BOT_TOKEN
 read -p "Admin ChatID: " ADMIN_ID
 
-# ساخت admin.json
+# Create admin.json
 cat > admin.json <<EOL
 {
     "bot_token": "$BOT_TOKEN",
