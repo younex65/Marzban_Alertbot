@@ -1,27 +1,27 @@
 #!/bin/bash
 
 # ==========================
-# اسکریپت نصب و اجرای Marzban Bot
+# Install Marzban Bot
 # ==========================
 
 PROJECT_DIR="/root/marzban_bot"
 VENV_DIR="$PROJECT_DIR/venv"
 
-echo "=== آپدیت و آپگرید سیستم ..."
+echo "=== update & upgrade ..."
 apt update -y && apt upgrade -y
 
-echo "=== نصب پیش‌نیازها ..."
+echo "=== PreInstall ..."
 apt install -y python3 python3-venv python3-pip curl git
 
-echo "=== ساخت فولدر پروژه ..."
+echo "=== Make project Folder ..."
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR" || exit
 
 # ==========================
-# دریافت اطلاعات از کاربر
+# Get info from the user
 # ==========================
-read -p "توکن ربات تلگرام خود را وارد کنید: " BOT_TOKEN
-read -p "چت‌آیدی ادمین را وارد کنید: " ADMIN_ID
+read -p "Telegram Bot Token: " BOT_TOKEN
+read -p "Admin ChatID: " ADMIN_ID
 
 # ساخت admin.json
 cat > admin.json <<EOL
@@ -31,24 +31,24 @@ cat > admin.json <<EOL
 }
 EOL
 
-echo "admin.json ساخته شد."
+echo "admin.json Builded."
 
 # ==========================
-# ساخت محیط مجازی و نصب کتابخانه‌ها
+# Nenv & Librarys
 # ==========================
-echo "=== ساخت محیط مجازی Python ..."
+echo "=== Nenv Python ..."
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
-echo "=== نصب کتابخانه‌های مورد نیاز ..."
+echo "=== Installing the required libraries ..."
 pip install --upgrade pip
 pip install --upgrade python-telegram-bot[job-queue] requests
 
 # ==========================
-# قرار دادن فایل‌های پروژه
+# Placing project files
 # ==========================
-echo "=== ساخت فایل‌های پروژه ..."
-# فایل bot.py
+echo "=== Creating project files ..."
+# bot.py File
 cat > bot.py <<'EOF'
 import os
 import json
@@ -65,7 +65,7 @@ from telegram.ext import (
 from marzban import MarzbanClient
 
 # -------------------
-# فایل‌ها
+# Files
 USERS_FILE = "users.json"
 ADMINS_FILE = "admin.json"
 PANELS_FILE = "panels.json"
@@ -86,7 +86,7 @@ def save_json(file, data):
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 # -------------------
-# داده‌ها
+# Datas
 admins_data = load_json(ADMINS_FILE)
 users_data = load_json(USERS_FILE, {})
 panels_data = load_json(PANELS_FILE, {"panels": []})
@@ -101,7 +101,7 @@ ADMIN_IDS = admins_data.get("admins", [])
 client = MarzbanClient()
 
 # -------------------
-# دکمه‌ها
+# Buttons
 def get_user_buttons(user_id):
     buttons = []
     if user_id not in ADMIN_IDS:
@@ -124,7 +124,7 @@ def back_button_admin():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
 
 # -------------------
-# هندلر استارت
+# Start handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in ADMIN_IDS:
@@ -133,7 +133,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("سلام! خوش آمدید.", reply_markup=get_user_buttons(user_id))
 
 # -------------------
-# کمک‌کننده‌ها
+# Helpers
 def push_admin_stack(context, view_name: str):
     stack = context.user_data.get("admin_stack", [])
     stack.append(view_name)
@@ -153,14 +153,14 @@ def clear_admin_awaits(context):
         context.user_data.pop(k, None)
 
 # -------------------
-# هندلر دکمه‌ها
+# Button handler
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = query.data
 
-    # ---------------- کاربران ----------------
+    # ---------------- Users ----------------
     if user_id not in ADMIN_IDS:
         if data == "user_back":
             await query.edit_message_text("منوی اصلی:", reply_markup=get_user_buttons(user_id))
@@ -224,7 +224,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-    # ---------------- ادمین ----------------
+    # ---------------- Admin ----------------
     else:
         if data == "admin_back":
             clear_admin_awaits(context)
@@ -304,12 +304,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
 # -------------------
-# هندلر پیام‌ها
+# Messages handler
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    # کاربران
+    # Users
     if context.user_data.get("awaiting_username"):
         if not panels_data["panels"]:
             await update.message.reply_text(
@@ -329,12 +329,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_json(USERS_FILE, users_data)
         context.user_data["awaiting_username"] = False
         await update.message.reply_text(
-            f"ثبت نام موفق! نام کاربری شما: {text}\nاکانت شما به پنل {panel['url']} اختصاص داده شد.",
+            f"ثبت نام موفقیت آمیز ✅ \nنام کاربری شما:{text}\nاکانت شما به بات اضافه شد.",
             reply_markup=get_user_buttons(user_id)
         )
         return
 
-    # ادمین
+    # Admin
     if context.user_data.get("awaiting_panel_url"):
         context.user_data["panel_url_temp"] = text
         context.user_data["awaiting_panel_url"] = False
@@ -404,7 +404,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # -------------------
-# هشدار خودکار
+# Auto alert
 async def run_alert_job(context: ContextTypes.DEFAULT_TYPE):
     for user_id, udata in users_data.items():
         username = udata.get("username")
@@ -446,7 +446,7 @@ async def run_alert_job(context: ContextTypes.DEFAULT_TYPE):
     save_json(USERS_FILE, users_data)
 
 # -------------------
-# اجرای بات
+# Run the bot
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(button))
@@ -457,7 +457,7 @@ app.job_queue.run_repeating(run_alert_job, interval=60, first=10)
 app.run_polling()
 EOF
 
-# فایل marzban.py
+# marzban.py File
 cat > marzban.py <<'EOF'
 import requests
 import time
@@ -530,15 +530,15 @@ class MarzbanClient:
         self.set_token(panel["token"])
 EOF
 
-# فایل های خالی JSON دیگر
+# JSON Files
 touch users.json panels.json triggers.json alerts.json
 
 # ==========================
-# ساخت سرویس systemd
+# Build systemd service
 # ==========================
 SERVICE_FILE="/etc/systemd/system/marzban_bot.service"
 
-echo "=== ایجاد سرویس systemd ..."
+echo "=== Create systemd service ..."
 cat > "$SERVICE_FILE" <<EOL
 [Unit]
 Description=Marzban Telegram Bot
@@ -555,10 +555,10 @@ Restart=always
 WantedBy=multi-user.target
 EOL
 
-# ریفرش systemd و استارت سرویس
+# systemd service refresh and start
 systemctl daemon-reload
 systemctl enable marzban_bot.service
 systemctl start marzban_bot.service
 
-echo "=== نصب و راه‌اندازی ربات کامل شد."
-echo "برای مشاهده وضعیت سرویس: systemctl status marzban_bot.service"
+echo "=== The robot installation and setup is complete."
+echo "To view the service status: systemctl status marzban_bot.service"
