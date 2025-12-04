@@ -606,7 +606,7 @@ def main():
     # every 60 seconds by default; you can change interval in triggers.json or here
     run_interval = 60
     try:
-        run_interval = int(triggers_data.get("job_interval_seconds", 60))
+        run_interval = int(triggers_data.get("job_interval_seconds", 300))
     except Exception:
         run_interval = 60
 
