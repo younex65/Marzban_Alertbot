@@ -1,57 +1,59 @@
 #!/bin/bash
 
-# ==========================
-# Install Marzban Bot
-# ==========================
+set -e
 
-PROJECT_DIR="/root/marzban_bot"
-VENV_DIR="$PROJECT_DIR/venv"
+echo "🔵 شروع نصب ربات هشدار Marzban ..."
 
-echo "=== update & upgrade ..."
+INSTALL_DIR="/opt/telegram_bot"
+VENV_DIR="$INSTALL_DIR/venv"
+
+echo "📦 آپدیت مخازن..."
 apt update -y && apt upgrade -y
 
-echo "=== PreInstall ..."
-apt install -y python3 python3-venv python3-pip curl git
+echo "📦 نصب پیش‌نیازهای اصلی..."
+apt install -y python3 python3-venv python3-pip
 
-echo "=== Make project Folder ..."
-mkdir -p "$PROJECT_DIR"
-cd "$PROJECT_DIR" || exit
+echo "📁 ساخت پوشه ربات..."
+mkdir -p "$INSTALL_DIR"
 
-# ==========================
-# Get info from the user
-# ==========================
-read -p "Telegram Bot Token: " BOT_TOKEN
-read -p "Admin ChatID: " ADMIN_ID
+echo "🐍 ساخت محیط مجازی پایتون..."
+python3 -m venv "$VENV_DIR"
 
-# Create admin.json
-cat > admin.json <<EOL
+echo "🐍 فعال‌سازی محیط مجازی..."
+source "$VENV_DIR/bin/activate"
+
+echo "📦 نصب کتابخانه‌های ضروری..."
+pip install --upgrade pip
+pip install "python-telegram-bot[job-queue]"==20.7
+pip install requests
+
+echo "📄 ساخت فایل admin.json ..."
+
+read -p "🔑 BOT TOKEN را وارد کنید: " BOT_TOKEN
+read -p "👤 Chat ID ادمین را وارد کنید: " ADMIN_ID
+
+cat > "$INSTALL_DIR/admin.json" <<EOF
 {
     "bot_token": "$BOT_TOKEN",
     "admins": [$ADMIN_ID]
 }
-EOL
+EOF
 
-echo "admin.json Builded."
+echo "📄 ساخت فایل bot.py (با placeholder)..."
 
-# ==========================
-# Nenv & Librarys
-# ==========================
-echo "=== Nenv Python ..."
-python3 -m venv "$VENV_DIR"
-source "$VENV_DIR/bin/activate"
+cat > "$INSTALL_DIR/bot.py" <<'EOF'
+#!/usr/bin/env python3
+# coding: utf-8
 
-echo "=== Installing the required libraries ..."
-pip install --upgrade pip
-pip install --upgrade python-telegram-bot[job-queue] requests
-
-# ==========================
-# Placing project files
-# ==========================
-echo "=== Creating project files ..."
-# bot.py File
-cat > bot.py <<'EOF'
 import os
 import json
+import time
+import math
+import signal
+import asyncio
+import logging
+from typing import Optional, Dict, Any
+
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -62,57 +64,88 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
 from marzban import MarzbanClient
 
-# -------------------
-# Files
+# ---------- Logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("telegram_bot")
+
+# ---------- Files ----------
 USERS_FILE = "users.json"
 ADMINS_FILE = "admin.json"
 PANELS_FILE = "panels.json"
 TRIGGERS_FILE = "triggers.json"
 ALERTS_FILE = "alerts.json"
 
-# -------------------
-# Load/Save JSON helper
-def load_json(file, default=None):
-    try:
-        with open(file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return default if default is not None else {}
+# ---------- Globals (will be loaded from files) ----------
+admins_data: Dict[str, Any] = {}
+users_data: Dict[str, Any] = {}
+panels_data: Dict[str, Any] = {}
+triggers_data: Dict[str, Any] = {}
+alerts_data: Dict[str, Any] = {}
 
-def save_json(file, data):
-    with open(file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-# -------------------
-# Datas
-admins_data = load_json(ADMINS_FILE)
-users_data = load_json(USERS_FILE, {})
-panels_data = load_json(PANELS_FILE, {"panels": []})
-triggers_data = load_json(TRIGGERS_FILE, {})
-alerts_data = load_json(ALERTS_FILE, {})
-
-BOT_TOKEN = admins_data.get("bot_token")
-if not BOT_TOKEN:
-    raise Exception("توکن بات در admin.json پیدا نشد!")
-
-ADMIN_IDS = admins_data.get("admins", [])
+BOT_TOKEN: Optional[str] = None
+ADMIN_IDS = []
 client = MarzbanClient()
 
-# -------------------
-# Buttons
-def get_user_buttons(user_id):
+# ---------- Helpers to load/save JSON ----------
+def load_json(path: str, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default if default is not None else {}
+    except json.JSONDecodeError as e:
+        logger.error("خطا در خواندن JSON از %s: %s", path, e)
+        return default if default is not None else {}
+    except Exception as e:
+        logger.exception("خطا هنگام خواندن فایل %s: %s", path, e)
+        return default if default is not None else {}
+
+def save_json(path: str, data):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        logger.exception("خطا هنگام نوشتن فایل %s: %s", path, e)
+
+# ---------- Config reload (used on SIGHUP or manual call) ----------
+def reload_configs():
+    global admins_data, users_data, panels_data, triggers_data, alerts_data, BOT_TOKEN, ADMIN_IDS
+    try:
+        admins_data = load_json(ADMINS_FILE, {})
+        users_data = load_json(USERS_FILE, {})
+        panels_data = load_json(PANELS_FILE, {"panels": []})
+        triggers_data = load_json(TRIGGERS_FILE, {})
+        alerts_data = load_json(ALERTS_FILE, {})
+
+        BOT_TOKEN = admins_data.get("bot_token")
+        ADMIN_IDS = admins_data.get("admins", [])
+
+        logger.info("پیکربندی‌ها مجدداً بارگذاری شدند. (%d admins, %d users, %d panels)",
+                    len(ADMIN_IDS), len(users_data), len(panels_data.get("panels", [])))
+    except Exception as e:
+        logger.exception("خطا در بارگذاری پیکربندی‌ها: %s", e)
+
+# Immediately load configs at startup
+reload_configs()
+
+# ---------- UI helpers ----------
+def get_user_buttons(user_id: int) -> InlineKeyboardMarkup:
     buttons = []
     if user_id not in ADMIN_IDS:
         buttons.append([InlineKeyboardButton("✅ ثبت نام کاربری", callback_data="register")])
         buttons.append([InlineKeyboardButton("📄 مشخصات اکانت", callback_data="account_info")])
     return InlineKeyboardMarkup(buttons)
 
-def back_button_user():
+def back_button_user() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="user_back")]])
 
-def admin_menu():
+def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛠 افزودن پنل", callback_data="add_panel")],
         [InlineKeyboardButton("👤 افزودن ادمین", callback_data="add_admin")],
@@ -120,11 +153,19 @@ def admin_menu():
         [InlineKeyboardButton("⚠️ تنظیم پیام‌های هشدار", callback_data="set_alerts")],
     ])
 
-def back_button_admin():
+def back_button_admin() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
 
-# -------------------
-# Start handler
+# ---------- Admin UI constants ----------
+ALERT_KEYS = [
+    "alert_time_left",
+    "alert_time_end",
+    "alert_data_left",
+    "alert_data_end",
+    "alert_account_deleted"
+]
+
+# ---------- Start handler ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in ADMIN_IDS:
@@ -132,8 +173,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("سلام! خوش آمدید.", reply_markup=get_user_buttons(user_id))
 
-# -------------------
-# Helpers
+# ---------- Admin stack helpers ----------
 def push_admin_stack(context, view_name: str):
     stack = context.user_data.get("admin_stack", [])
     stack.append(view_name)
@@ -152,24 +192,28 @@ def clear_admin_awaits(context):
     for k in keys:
         context.user_data.pop(k, None)
 
-# -------------------
-# Button handler
+# ---------- Callback button handler ----------
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = query.data
 
-    # ---------------- Users ----------------
+    # reload in-memory configs if they were changed by external process recently
+    # (Note: we don't reload token here because application token cannot be changed live)
+    # reload_configs()  # optionally call here if you want aggressive reload
+
+    # ------------ regular users ------------
     if user_id not in ADMIN_IDS:
         if data == "user_back":
             await query.edit_message_text("منوی اصلی:", reply_markup=get_user_buttons(user_id))
             return
 
         if data == "register":
-            if not panels_data["panels"]:
+            if not panels_data.get("panels"):
                 await query.edit_message_text(
-                    "فعلاً هیچ پنلی ثبت نشده است.\nلطفاً منتظر اضافه شدن پنل توسط ادمین بمانید.",
+                    """فعلاً هیچ پنلی ثبت نشده است.
+لطفاً منتظر اضافه شدن پنل توسط ادمین بمانید.""",
                     reply_markup=back_button_user()
                 )
                 return
@@ -182,24 +226,25 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "token": user_info["panel_token"]
                     })
                     client.get_user_info(user_info["username"])
-                    # اگر کاربر هنوز در پنل هست
                     await query.edit_message_text(
                         f"شما قبلاً ثبت نام کرده‌اید.\nنام کاربری: {user_info['username']}",
                         reply_markup=back_button_user()
                     )
                     return
                 except Exception:
-                    # اگر کاربر تو پنل حذف شده باشه
+                    # user not found in panel -> send account-deleted alert (if configured), remove locally
+                    try:
+                        msg = alerts_data.get("alert_account_deleted", "اکانت شما از پنل حذف شده است.")
+                        await context.bot.send_message(chat_id=int(user_id), text=msg)
+                    except Exception:
+                        logger.debug("خطا در ارسال پیام حذف اکانت به کاربر %s", user_id)
                     users_data.pop(str(user_id), None)
                     save_json(USERS_FILE, users_data)
-                    # ادامه فرآیند ثبت نام جدید
+                    # continue to registration flow
 
-            # اگر کاربر ثبت نام نکرده یا حذف شده
+            # ask for username
             context.user_data["awaiting_username"] = True
-            await query.edit_message_text(
-                "لطفاً نام کاربری خود را وارد کنید:", 
-                reply_markup=back_button_user()
-            )
+            await query.edit_message_text("لطفاً نام کاربری خود را وارد کنید:", reply_markup=back_button_user())
             return
 
         if data == "account_info":
@@ -214,17 +259,22 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 remaining_gb = client.bytes_to_gb(float(info["data_limit"]) - float(info["used_traffic"]))
                 text = f"نام کاربری: {user_info['username']}\nزمان باقی مانده: {days_left} روز\nحجم باقی مانده: {remaining_gb} گیگابایت"
                 await query.edit_message_text(text, reply_markup=back_button_user())
-            except Exception as e:
-                # اگر کاربر در پنل حذف شده باشه
+            except Exception:
+                try:
+                    msg = alerts_data.get("alert_account_deleted", "اکانت شما از پنل حذف شده است.")
+                    await context.bot.send_message(chat_id=int(user_id), text=msg)
+                except Exception:
+                    logger.debug("خطا در ارسال پیام حذف اکانت به کاربر %s", user_id)
                 users_data.pop(str(user_id), None)
                 save_json(USERS_FILE, users_data)
                 await query.edit_message_text(
-                    f"خطا در دریافت اطلاعات اکانت. ممکن است کاربر از پنل حذف شده باشد.\nلطفاً دوباره ثبت نام کنید.",
+                    """خطا در دریافت اطلاعات اکانت. ممکن است کاربر از پنل حذف شده باشد.
+لطفاً دوباره ثبت نام کنید.""",
                     reply_markup=back_button_user()
                 )
             return
 
-    # ---------------- Admin ----------------
+    # ------------ admins ------------
     else:
         if data == "admin_back":
             clear_admin_awaits(context)
@@ -246,6 +296,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("⏰ هشدار اتمام زمان", callback_data="alert_time_end")],
                     [InlineKeyboardButton("📦 هشدار حجم باقی مانده", callback_data="alert_data_left")],
                     [InlineKeyboardButton("❌ هشدار اتمام حجم", callback_data="alert_data_end")],
+                    [InlineKeyboardButton("⚠️ هشدار حذف اکانت از پنل", callback_data="alert_account_deleted")],
                     [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")],
                 ]
                 await query.edit_message_text("کدام پیام هشدار را می‌خواهید تنظیم کنید؟", reply_markup=InlineKeyboardMarkup(buttons))
@@ -280,6 +331,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("⏰ هشدار اتمام زمان", callback_data="alert_time_end")],
                 [InlineKeyboardButton("📦 هشدار حجم باقی مانده", callback_data="alert_data_left")],
                 [InlineKeyboardButton("❌ هشدار اتمام حجم", callback_data="alert_data_end")],
+                [InlineKeyboardButton("⚠️ هشدار حذف اکانت از پنل", callback_data="alert_account_deleted")],
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")],
             ]
             await query.edit_message_text("کدام پیام هشدار را می‌خواهید تنظیم کنید؟", reply_markup=InlineKeyboardMarkup(buttons))
@@ -303,19 +355,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("لطفاً متن پیام هشدار را وارد کنید:", reply_markup=back_button_admin())
             return
 
-# -------------------
-# Messages handler
+# ---------- Message handler ----------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text
+    text = update.message.text.strip() if update.message.text else ""
 
-    # Users
+    # registration username
     if context.user_data.get("awaiting_username"):
-        if not panels_data["panels"]:
-            await update.message.reply_text(
-                "فعلاً هیچ پنلی ثبت نشده است.",
-                reply_markup=get_user_buttons(user_id)
-            )
+        if not panels_data.get("panels"):
+            await update.message.reply_text("""فعلاً هیچ پنلی ثبت نشده است.
+لطفاً منتظر اضافه شدن پنل توسط ادمین بمانید.""", reply_markup=get_user_buttons(user_id))
             context.user_data["awaiting_username"] = False
             return
 
@@ -324,17 +373,28 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "username": text,
             "panel_url": panel["url"],
             "panel_token": panel["token"],
-            "sent_alerts": []
+            "sent_alerts": [],
+            "last_expire": None,
+            "last_limit": None
         }
+
+        try:
+            client.login_to_panel({"url": panel["url"], "token": panel["token"]})
+            info = client.get_user_info(text)
+            users_data[str(user_id)]["last_expire"] = int(info.get("expire"))
+            users_data[str(user_id)]["last_limit"] = float(info.get("data_limit"))
+        except Exception:
+            logger.debug("نشد که اطلاعات اولیه کاربر را از پنل بخوانیم؛ مقدارهای last_* None نگه داشته شدند")
+
         save_json(USERS_FILE, users_data)
         context.user_data["awaiting_username"] = False
         await update.message.reply_text(
-            f"ثبت نام موفقیت آمیز ✅ \nنام کاربری شما:{text}\nاکانت شما به بات اضافه شد.",
+            f"ثبت نام موفق! نام کاربری شما: {text}\nاکانت شما به پنل {panel['url']} اختصاص داده شد.",
             reply_markup=get_user_buttons(user_id)
         )
         return
 
-    # Admin
+    # admin flows
     if context.user_data.get("awaiting_panel_url"):
         context.user_data["panel_url_temp"] = text
         context.user_data["awaiting_panel_url"] = False
@@ -358,7 +418,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["admin_stack"] = []
         try:
             token = client.get_token(panel_url, username, password)
-            panels_data["panels"].append({"url": panel_url, "token": token})
+            panels = panels_data.get("panels", [])
+            panels.append({"url": panel_url, "token": token})
+            panels_data["panels"] = panels
             save_json(PANELS_FILE, panels_data)
             await update.message.reply_text("پنل با موفقیت اضافه شد!", reply_markup=admin_menu())
         except Exception as e:
@@ -380,19 +442,25 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if context.user_data.get("awaiting_trigger_time"):
-        triggers_data["time_hours"] = int(text)
-        save_json(TRIGGERS_FILE, triggers_data)
-        context.user_data["awaiting_trigger_time"] = False
-        context.user_data["admin_stack"] = []
-        await update.message.reply_text(f"تریگر زمان با موفقیت روی {text} ساعت تنظیم شد.", reply_markup=admin_menu())
+        try:
+            triggers_data["time_hours"] = int(text)
+            save_json(TRIGGERS_FILE, triggers_data)
+            context.user_data["awaiting_trigger_time"] = False
+            context.user_data["admin_stack"] = []
+            await update.message.reply_text(f"تریگر زمان با موفقیت روی {text} ساعت تنظیم شد.", reply_markup=admin_menu())
+        except ValueError:
+            await update.message.reply_text("لطفاً یک عدد معتبر وارد کنید.", reply_markup=back_button_admin())
         return
 
     if context.user_data.get("awaiting_trigger_data"):
-        triggers_data["data_gb"] = float(text)
-        save_json(TRIGGERS_FILE, triggers_data)
-        context.user_data["awaiting_trigger_data"] = False
-        context.user_data["admin_stack"] = []
-        await update.message.reply_text(f"تریگر حجم با موفقیت روی {text} گیگابایت تنظیم شد.", reply_markup=admin_menu())
+        try:
+            triggers_data["data_gb"] = float(text)
+            save_json(TRIGGERS_FILE, triggers_data)
+            context.user_data["awaiting_trigger_data"] = False
+            context.user_data["admin_stack"] = []
+            await update.message.reply_text(f"تریگر حجم با موفقیت روی {text} گیگابایت تنظیم شد.", reply_markup=admin_menu())
+        except ValueError:
+            await update.message.reply_text("لطفاً یک مقدار عددی معتبر وارد کنید.", reply_markup=back_button_admin())
         return
 
     if context.user_data.get("awaiting_alert_type"):
@@ -403,62 +471,175 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"پیام هشدار '{alert_type}' با موفقیت ذخیره شد.", reply_markup=admin_menu())
         return
 
-# -------------------
-# Auto alert
+# ---------- Alert job ----------
 async def run_alert_job(context: ContextTypes.DEFAULT_TYPE):
-    for user_id, udata in users_data.items():
+    # We operate on the in-memory users_data; saving after modifications
+    to_delete = []
+
+    for user_id, udata in list(users_data.items()):
         username = udata.get("username")
         if not username:
             continue
+
         try:
             client.login_to_panel({"url": udata["panel_url"], "token": udata["panel_token"]})
             info = client.get_user_info(username)
-            remaining_gb = client.bytes_to_gb(float(info["data_limit"]) - float(info["used_traffic"]))
-            expire_days = client.calculate_days_remaining(int(info["expire"]))
-        except:
+
+            remaining_gb = client.bytes_to_gb(float(info.get("data_limit", 0)) - float(info.get("used_traffic", 0)))
+            expire_days = client.calculate_days_remaining(int(info.get("expire", 0)))
+
+            # reset alerts if renewed
+            old_expire = udata.get("last_expire")
+            old_limit = udata.get("last_limit")
+
+            try:
+                new_expire = int(info.get("expire"))
+            except Exception:
+                new_expire = None
+            try:
+                new_limit = float(info.get("data_limit"))
+            except Exception:
+                new_limit = None
+
+            if (old_expire is not None and new_expire is not None and new_expire > old_expire) or \
+               (old_limit is not None and new_limit is not None and new_limit > old_limit):
+                udata["sent_alerts"] = []
+
+            if new_expire is not None:
+                udata["last_expire"] = new_expire
+            if new_limit is not None:
+                udata["last_limit"] = new_limit
+
+        except Exception:
+            # assume user removed from panel
+            try:
+                msg = alerts_data.get("alert_account_deleted", "اکانت شما از پنل حذف شده است.")
+                await context.bot.send_message(chat_id=int(user_id), text=msg)
+            except Exception:
+                logger.debug("نشد پیام حذف اکانت را به کاربر %s ارسال کنیم", user_id)
+            to_delete.append(str(user_id))
             continue
 
         sent_alerts = udata.get("sent_alerts", [])
 
+        # data left
         if "data_gb" in triggers_data and remaining_gb <= triggers_data["data_gb"]:
             if "alert_data_left" not in sent_alerts:
                 msg = alerts_data.get("alert_data_left", f"حجم باقی مانده شما: {remaining_gb} گیگابایت")
-                await context.bot.send_message(chat_id=int(user_id), text=msg)
+                try:
+                    await context.bot.send_message(chat_id=int(user_id), text=msg)
+                except Exception:
+                    logger.debug("خطا در ارسال پیام alert_data_left به %s", user_id)
                 sent_alerts.append("alert_data_left")
+
+        # data end
         if remaining_gb <= 0:
             if "alert_data_end" not in sent_alerts:
                 msg = alerts_data.get("alert_data_end", "حجم شما تمام شد!")
-                await context.bot.send_message(chat_id=int(user_id), text=msg)
+                try:
+                    await context.bot.send_message(chat_id=int(user_id), text=msg)
+                except Exception:
+                    logger.debug("خطا در ارسال پیام alert_data_end به %s", user_id)
                 sent_alerts.append("alert_data_end")
+
+        # time left
         if "time_hours" in triggers_data and expire_days <= triggers_data["time_hours"]:
             if "alert_time_left" not in sent_alerts:
                 msg = alerts_data.get("alert_time_left", f"زمان باقی مانده: {expire_days} روز")
-                await context.bot.send_message(chat_id=int(user_id), text=msg)
+                try:
+                    await context.bot.send_message(chat_id=int(user_id), text=msg)
+                except Exception:
+                    logger.debug("خطا در ارسال پیام alert_time_left به %s", user_id)
                 sent_alerts.append("alert_time_left")
+
+        # time end
         if expire_days <= 0:
             if "alert_time_end" not in sent_alerts:
                 msg = alerts_data.get("alert_time_end", "زمان اکانت شما تمام شد!")
-                await context.bot.send_message(chat_id=int(user_id), text=msg)
+                try:
+                    await context.bot.send_message(chat_id=int(user_id), text=msg)
+                except Exception:
+                    logger.debug("خطا در ارسال پیام alert_time_end به %s", user_id)
                 sent_alerts.append("alert_time_end")
 
         udata["sent_alerts"] = sent_alerts
 
-    save_json(USERS_FILE, users_data)
+    # persist deletions
+    if to_delete:
+        for uid in to_delete:
+            users_data.pop(uid, None)
+        save_json(USERS_FILE, users_data)
+        logger.info("تعداد %d کاربر از users.json حذف شدند (از پنل پاک شده بودند).", len(to_delete))
 
-# -------------------
-# Run the bot
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(button))
-app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
+# ---------- Signal handler for reload ----------
+def _sighup_handler():
+    logger.info("SIGHUP دریافت شد — بارگذاری مجدد پیکربندی‌ها.")
+    reload_configs()
 
-app.job_queue.run_repeating(run_alert_job, interval=60, first=10)
+def install_signal_handlers(loop: Optional[asyncio.AbstractEventLoop] = None):
+    # Best-effort: only install signal handlers on UNIX
+    try:
+        if loop is None:
+            loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGHUP, _sighup_handler)
+        logger.info("Signal handler for SIGHUP نصب شد (برای reload پیکربندی‌ها).")
+    except NotImplementedError:
+        logger.warning("Signal handlers پشتیبانی نشده است (شاید در ویندوز هستید).")
+    except Exception as e:
+        logger.exception("خطا در نصب signal handler: %s", e)
 
-app.run_polling()
+# ---------- Main: build app and run ----------
+def main():
+    global BOT_TOKEN
+
+    if not BOT_TOKEN:
+        logger.error("توکن بات در admin.json پیدا نشد! لطفاً admin.json را تنظیم کنید.")
+        raise SystemExit(1)
+
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
+
+    # schedule job: use job_queue of application
+    # every 60 seconds by default; you can change interval in triggers.json or here
+    run_interval = 60
+    try:
+        run_interval = int(triggers_data.get("job_interval_seconds", 60))
+    except Exception:
+        run_interval = 60
+
+    application.job_queue.run_repeating(run_alert_job, interval=run_interval, first=10)
+
+    # install signal handlers for SIGHUP to reload config
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        install_signal_handlers(loop)
+    except Exception:
+        pass
+
+    logger.info("بات راه‌اندازی می‌شود. (token present: %s...)",
+                (BOT_TOKEN[:8] + "...") if BOT_TOKEN else "NO_TOKEN")
+
+    # run application (this will manage its own event loop)
+    # we use .run_polling() which is blocking
+    try:
+        application.run_polling()
+    except KeyboardInterrupt:
+        logger.info("دریافت SIGINT — خروج.")
+    except Exception:
+        logger.exception("خطا هنگام اجرای بات:")
+
+if __name__ == "__main__":
+    main()
+
 EOF
 
-# marzban.py File
-cat > marzban.py <<'EOF'
+echo "📄 ساخت فایل marzban.py (با placeholder)..."
+
+cat > "$INSTALL_DIR/marzban.py" <<'EOF'
 import requests
 import time
 from datetime import datetime
@@ -528,37 +709,46 @@ class MarzbanClient:
     def login_to_panel(self, panel):
         self.set_base_url(panel["url"])
         self.set_token(panel["token"])
+
 EOF
 
-# JSON Files
-touch users.json panels.json triggers.json alerts.json
 
-# ==========================
-# Build systemd service
-# ==========================
-SERVICE_FILE="/etc/systemd/system/marzban_bot.service"
+echo "⚙️ ساخت سرویس systemd..."
 
-echo "=== Create systemd service ..."
-cat > "$SERVICE_FILE" <<EOL
+cat > /etc/systemd/system/telegrambot.service <<EOF
 [Unit]
-Description=Marzban Telegram Bot
+Description=Telegram Alert Bot (Marzban)
 After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=$PROJECT_DIR
-ExecStart=$VENV_DIR/bin/python $PROJECT_DIR/bot.py
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$VENV_DIR/bin/python3 $INSTALL_DIR/bot.py
 Restart=always
+RestartSec=3
+
+# Reload config without restart
+ExecReload=/bin/kill -HUP \$MAINPID
+
+User=root
 
 [Install]
 WantedBy=multi-user.target
-EOL
+EOF
 
-# systemd service refresh and start
+echo "🔄 ریلود systemd..."
 systemctl daemon-reload
-systemctl enable marzban_bot.service
-systemctl start marzban_bot.service
 
-echo "=== The robot installation and setup is complete."
-echo "To view the service status: systemctl status marzban_bot.service"
+echo "▶️ فعال‌سازی و اجرای سرویس..."
+systemctl enable telegrambot
+systemctl start telegrambot
+
+echo "✅ نصب با موفقیت انجام شد!"
+echo "📌 فایل‌ها ایجاد شدند:"
+echo "   $INSTALL_DIR/bot.py"
+echo "   $INSTALL_DIR/marzban.py"
+echo "📌 لطفاً جایگزین‌کردن کد اصلی را فراموش نکنید."
+echo "📌 برای مشاهده لاگ‌ها:"
+echo "   journalctl -fu telegrambot"
+echo "📌 برای Reload (اعمال تغییرات بدون ری‌استارت):"
+echo "   systemctl reload telegrambot"
